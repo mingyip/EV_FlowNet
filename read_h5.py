@@ -33,13 +33,13 @@ def vis_events(events, imsize):
     np.maximum.at(res, i, np.full_like(x, 255, dtype=np.uint8))
     return np.tile(res.reshape(imsize)[..., None], (1, 1, 3))
 
-def ev_pol_loss(events, flow, img_size, idx1=0, output=False):
+def vis_ev_pol_loss(events, flow, img_size, idx1=0, output=False):
 
-    if not output:
-        return 0
+    # if not output:
+    #     return 0
 
-    tttt = np.array([1,-1])
-    flow += tttt[:, None, None]
+    # tttt = np.array([1,-1])
+    # flow += tttt[:, None, None]
 
     cum_total_time = 0
     cum_op1_time = 0
@@ -85,10 +85,10 @@ def ev_pol_loss(events, flow, img_size, idx1=0, output=False):
         
         start_op1_time = time.time()
         for i in range(len(x)):
-            denom[y_max[i], x_max[i]] += 1
-            denom[y_max[i], x_min[i]] += 1
-            denom[y_min[i], x_max[i]] += 1
-            denom[y_min[i], x_min[i]] += 1
+            denom[y_max[i], x_max[i]] += denom_ymax_xmax[i]
+            denom[y_max[i], x_min[i]] += denom_ymax_xmin[i]
+            denom[y_min[i], x_max[i]] += denom_ymin_xmax[i]
+            denom[y_min[i], x_min[i]] += denom_ymin_xmin[i]
 
             nom[y_max[i], x_max[i]] += nom_ymax_xmax[i]
             nom[y_max[i], x_min[i]] += nom_ymax_xmin[i]
@@ -105,7 +105,7 @@ def ev_pol_loss(events, flow, img_size, idx1=0, output=False):
         
         loss = np.square(np.divide(nom, denom + 0.00001))
 
-        
+
         loss_sum = np.sum(loss)
         denom_sum = np.sum(denom)
         nom_sum = np.sum(nom)
@@ -136,12 +136,67 @@ def ev_pol_loss(events, flow, img_size, idx1=0, output=False):
         image2 = cv2.hconcat([nom, denom])
         image = cv2.vconcat([image1, image2])
 
-        if output:
-            cv2.imwrite("image_{:05}.png".format(idx), image)
+        # if output:
+        #     cv2.imwrite("image_{:05}.png".format(idx), image)
         # loss = np.square(np.divide(nom, denom + 0.00001))
     cum_total_time = time.time() - start_total_time
-    print(cum_total_time, cum_op1_time, cum_op2_time, cum_op3_time, cum_op4_time)
+    # print(cum_total_time, cum_op1_time, cum_op2_time, cum_op3_time, cum_op4_time)
 
+    return np.sum(loss)
+
+
+
+def ev_loss(events, flow, image_size):
+    
+    H, W = image_size
+    x, y, t = events
+    num_events = len(x)
+    denom = np.zeros(image_size, dtype=np.float)
+    nom = np.zeros(image_size, dtype=np.float)
+
+
+    # Calculate new position after flow
+    # clip value ensures new coordinates are still on the image.
+    x_ = x + (1-t) * flow[0,y,x]
+    y_ = y + (1-t) * flow[1,y,x]
+    x_ = np.clip(x_, 0, W-1)
+    y_ = np.clip(y_, 0, H-1)
+
+    # Calculate 4 interpolation corners.
+    x_max = np.clip(np.ceil(x_), 0, W-1).astype(int)
+    x_min = np.clip(np.floor(x_), 0, W-1).astype(int)
+    y_max = np.clip(np.ceil(y_), 0, H-1).astype(int)
+    y_min = np.clip(np.floor(y_), 0, H-1).astype(int)
+
+    y_top_ratio = y_ - y_min
+    y_bot_ratio = 1 - y_top_ratio
+    x_top_ratio = x_ - x_min
+    x_bot_ratio = 1 - x_top_ratio
+
+    # Calculate denominator and nominator values according to the algo
+    # in the paper.
+    denom_ymax_xmax = y_top_ratio * x_top_ratio
+    denom_ymax_xmin = y_top_ratio * x_bot_ratio
+    denom_ymin_xmax = y_bot_ratio * x_top_ratio
+    denom_ymin_xmin = y_bot_ratio * x_bot_ratio
+
+    nom_ymax_xmax = denom_ymax_xmax * t
+    nom_ymax_xmin = denom_ymax_xmin * t
+    nom_ymin_xmax = denom_ymin_xmax * t
+    nom_ymin_xmin = denom_ymin_xmin * t
+
+    for i in range(num_events):
+        denom[y_max[i], x_max[i]] += denom_ymax_xmax[i]
+        denom[y_max[i], x_min[i]] += denom_ymax_xmin[i]
+        denom[y_min[i], x_max[i]] += denom_ymin_xmax[i]
+        denom[y_min[i], x_min[i]] += denom_ymin_xmin[i]
+
+        nom[y_max[i], x_max[i]] += nom_ymax_xmax[i]
+        nom[y_max[i], x_min[i]] += nom_ymax_xmin[i]
+        nom[y_min[i], x_max[i]] += nom_ymin_xmax[i]
+        nom[y_min[i], x_min[i]] += nom_ymin_xmin[i]
+
+    loss = np.square(np.divide(nom, denom + 0.00001))
     return np.sum(loss)
 
 
@@ -153,11 +208,53 @@ def flow_loss(events, flow, img_size, idx=0):
     t = (t - t[0]) / (t[-1] - t[0])
     n = p == False
 
-    forward_p_loss = ev_pol_loss((x[p], y[p], t[p]), flow, img_size, idx, False)
-    forward_n_loss = ev_pol_loss((x[n], y[n], t[n]), flow, img_size, idx, False)
+    l1 = -1
+    l2 = -1
+    l3 = -1
+    l4 = -1
 
-    backward_p_loss = ev_pol_loss((x[p], y[p], 1-t[p]), -flow, img_size, idx, True)
-    backward_n_loss = ev_pol_loss((x[n], y[n], 1-t[n]), -flow, img_size, idx, False)
+    l1_val = 1000000
+    l2_val = 1000000
+    l3_val = 1000000
+    l4_val = 1000000
+
+    for i in range(400):
+
+        if i == 0:
+            continue
+
+        flow_ = flow * (0.0001 * i) #TODO: remove the constant factor in real training
+        loss1 = forward_p_loss = ev_loss((x[p], y[p], t[p]), flow_, img_size)
+        loss2 = forward_n_loss = ev_loss((x[n], y[n], t[n]), flow_, img_size)
+
+        loss3 = backward_p_loss = ev_loss((x[p], y[p], 1-t[p]), -flow_, img_size)
+        loss4 = backward_n_loss = ev_loss((x[n], y[n], 1-t[n]), -flow_, img_size)
+
+        print(i, loss1, loss2, loss3, loss4)
+
+        if l1_val > loss1:
+            l1 = i
+            l1_val = loss1
+
+        if l2_val > loss2:
+            l2 = i
+            l2_val = loss2
+            
+        if l3_val > loss3:
+            l3 = i
+            l3_val = loss3
+
+        if l4_val > loss4:
+            l4 = i
+            l4_val = loss4
+
+    print()
+    print(l1, l1_val)
+    print(l2, l2_val)
+    print(l3, l3_val)
+    print(l4, l4_val)
+
+    raise
 
     # print(forward_p_loss, forward_n_loss, backward_p_loss, backward_n_loss)
     return forward_p_loss, forward_n_loss, backward_p_loss, backward_n_loss
