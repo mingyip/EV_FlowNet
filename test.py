@@ -82,19 +82,20 @@ def collage(flow_rgb, events_rgb):
         k = l
     return res
 
-def move_flow(flow, events, imsize):
+def move_flow(flow, events, imsize, forward=True):
 
     x, y, t, p = events
-    # t = (t[-1] - t) / (t[-1] - t[0])
+
+    if forward:
+        t = (t[-1] - t) / (t[-1] - t[0])
+    else:
+        t = (t[0] - t) / (t[-1] - t[0])
 
     x = x.astype(int)
     y = y.astype(int)
 
-    # y_ = y + t * flow[y, x, 0]
-    # x_ = x + t * flow[y, x, 1]
-
-    y_ = y - flow[y, x, 1]
-    x_ = x - flow[y, x, 0]
+    y_ = y + t * flow[y, x, 0]
+    x_ = x + t * flow[y, x, 1]
 
     x_ = np.clip(x_, 0, imsize[1]-1).astype(int)
     y_ = np.clip(y_, 0, imsize[0]-1).astype(int)
@@ -108,6 +109,11 @@ def get_pos_events(events):
     y = y[p == 1.0]
     t = t[p == 1.0]
     p = p[p == 1.0]
+
+    x = x[y < 200]
+    t = t[y < 200]
+    p = p[y < 200]
+    y = y[y < 200]
 
     return [x, y, t, p]
 
@@ -174,99 +180,53 @@ num_frames = len(frame_ts) - 1
 idx_array = np.searchsorted(t, frame_ts)
 
 
-track_idx_ori = np.array([10, 20, 30, 40, 50, 60, 70, 80, 90, 100], dtype=np.int)
-track_idx = np.array([10, 20, 30, 40, 50, 60, 70, 80, 90, 100], dtype=np.int)
-# track_idx = np.array([10, 50], dtype=np.int)
-track_x_dict = {'x0': [], 'x1': [], 'x2': [], 'x3': [], 'x4': [], 'x5': [], 'x6': [], 'x7': [], 'x8': [], 'x9': []}
-track_y_dict = {'y0': [], 'y1': [], 'y2': [], 'y3': [], 'y4': [], 'y5': [], 'y6': [], 'y7': [], 'y8': [], 'y9': []}
-
-
 for k, (b, e) in tqdm(enumerate(zip(idx_array[:-1], idx_array[1:])), total = num_frames):
 
-    if k < 2500:
-        frame_events = get_pos_events([x[b:e] for x in events])
+    if k < 3500:
         continue
 
-    flow = of([frame_events], [frame_ts[k-1]], [frame_ts[k]], return_all=True)
+    frame_events = get_pos_events([x[b:e] for x in events])
+    flow = of([frame_events], [frame_ts[k]], [frame_ts[k+1]], return_all=True)
     flow = tuple(map(np.squeeze, flow))
 
-    track_events = get_events_by_idx(frame_events, track_idx)
-    track_events_next_position = move_flow(flow[3], track_events, imsize)
-
-
-    # map track_pts to next frame events
-    frame_events_next = get_pos_events([x[b:e] for x in events])
-    track_idx_next = get_new_track_points_idx(track_events_next_position, frame_events_next)
+    event_img = vis_events(frame_events, imsize)
+    forward_move = move_flow(flow[3], frame_events, imsize, forward=True)
+    backward_move = move_flow(flow[3], frame_events, imsize, forward=False)
 
     # visualization
     flow_img = vis_flow(flow[3])
-    events_img = vis_events(frame_events, imsize) // 2
-    events_img[-50:, -50:] = draw_color_wheel_np(50, 50)
+    flow_img[-50:, -50:] = draw_color_wheel_np(50, 50)
+    forward_img = vis_events(forward_move, imsize)
+    backward_img = vis_events(backward_move, imsize)
+    diff_img = np.abs(forward_img - backward_img)
 
-    x_idx = frame_events[0][track_idx].astype(np.int)
-    y_idx = frame_events[1][track_idx].astype(np.int)
-    x_idx_ = frame_events_next[0][track_idx_next].astype(np.int)
-    y_idx_ = frame_events_next[1][track_idx_next].astype(np.int)
+    # Add labels to images
+    cv2.putText(flow_img, "Flow Prediction", (0, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+    cv2.putText(event_img, "Event Image", (0, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+    cv2.putText(forward_img, "Forward", (0, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+    cv2.putText(backward_img, "Backward", (0, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+    cv2.putText(diff_img, "diff", (0, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-    for i in range(len(track_idx)):
-        
-        xs = track_x_dict[f"x{i}"]
-        ys = track_y_dict[f"y{i}"]
+    img_top = np.hstack([flow_img, event_img, np.zeros_like(event_img)])
+    img_bot = np.hstack([forward_img, backward_img, diff_img])
 
-        # xs -= x_idx_[i] - x_idx[i]
-        # ys -= y_idx_[i] - y_idx[i]
+    track_idx = np.random.randint(0, len(frame_events[0]), size=20)
 
-        xs = list(xs)
-        ys = list(ys)
+    for i in track_idx:
+        x = int(forward_move[0][i])
+        y = int(forward_move[1][i])
+        x_ = int(backward_move[0][i]) + 360
+        y_ = int(backward_move[1][i])
+        color = np.random.randint(0, 255, size=(1, 3), dtype=np.uint8).squeeze()
+        color = ( int (color [ 0 ]), int (color [ 1 ]), int (color [ 2 ]))
+        img_bot = cv2.circle(img_bot, (x, y), radius=3, color=color, thickness=-1)
+        img_bot = cv2.circle(img_bot, (x_, y_), radius=3, color=color, thickness=-1)
+        img_bot = cv2.line(img_bot, (x,y), (x_,y_), color=color, thickness=1)
 
-        xs.append(x_idx[i])
-        ys.append(y_idx[i])
-
-        track_x_dict[f"x{i}"] = xs[-20:]
-        track_y_dict[f"y{i}"] = ys[-20:]
-    
-        x_last = xs[0]
-        y_last = ys[0]
-        for x, y in zip(xs[1:], ys[1:]):
-            events_img = cv2.line(events_img, (x_last, y_last), (x, y), thickness=1, color=(0, 255, 0))
-            x_last = x
-            y_last = y
-        
-        events_img = cv2.circle(events_img, (x_idx_[i], y_idx_[i]), radius=1, color=(0, 0, 255), thickness=-1)
-        
-        if ( x_idx_[i] - x_last) ** 2 + (y_idx_[i] - y_last) ** 2 > 100:
-            track_x_dict[f"x{i}"] = []
-            track_y_dict[f"y{i}"] = []
-
-            track_idx_next[i] = track_idx_ori[i]
-
-
-
-
-    img = np.hstack([flow_img, events_img])
+    img = np.vstack([img_top, img_bot])
     cv2.imshow("", img)
     cv2.imwrite(f"{k}.png", img)
 
-    cv2.waitKey(10000)
+    cv2.waitKey(100000)
+    raise
 
-    track_idx = track_idx_next
-    frame_events = frame_events_next
-
-
-    # for i, (idx, idx_) in enumerate(zip(track_idx, track_idx_next)):
-
-    #     x_idx = int(frame_events[0][idx])
-    #     y_idx = int(frame_events[1][idx])
-    #     x_idx_ = int(frame_events_next[0][idx_])
-    #     y_idx_ = int(frame_events_next[1][idx_])
-
-
-    #     events_img = cv2.circle(events_img, (x_idx, y_idx), radius=2, color=(0, 255, 0), thickness=-1)
-    #     events_img = cv2.circle(events_img, (x_idx_, y_idx_), radius=2, color=(0, 0, 255), thickness=-1)
-
-    # img = np.hstack([flow_img, events_img])
-    # cv2.imshow("", img)
-    # cv2.waitKey(1)
-
-    # track_idx = track_idx_next
-    # frame_events = frame_events_next
