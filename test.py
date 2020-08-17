@@ -5,6 +5,9 @@ from skimage.color import hsv2rgb
 import numpy as np
 from tqdm import tqdm
 
+from mpl_toolkits import mplot3d
+import matplotlib.pyplot as plt
+
 import copy
 import cv2
 
@@ -180,10 +183,15 @@ num_frames = len(frame_ts) - 1
 idx_array = np.searchsorted(t, frame_ts)
 
 
+pose_list = []
+
 for k, (b, e) in tqdm(enumerate(zip(idx_array[:-1], idx_array[1:])), total = num_frames):
 
     if k < 3500:
         continue
+
+    # if k > 3600:
+    #     break
 
     frame_events = get_pos_events([x[b:e] for x in events])
     flow = of([frame_events], [frame_ts[k]], [frame_ts[k+1]], return_all=True)
@@ -210,7 +218,26 @@ for k, (b, e) in tqdm(enumerate(zip(idx_array[:-1], idx_array[1:])), total = num
     img_top = np.hstack([flow_img, event_img, np.zeros_like(event_img)])
     img_bot = np.hstack([forward_img, backward_img, diff_img])
 
-    track_idx = np.random.randint(0, len(frame_events[0]), size=20)
+    track_idx = np.random.randint(0, len(frame_events[0]), size=10)
+
+    x = forward_move[0][track_idx]
+    y = forward_move[1][track_idx]
+    x_ = backward_move[0][track_idx]
+    y_ = backward_move[1][track_idx]
+
+    points1 = np.dstack([x_, y_]).squeeze()
+    points2 = np.dstack([x, y]).squeeze()
+
+    E, mask = cv2.findEssentialMat(points1, points2, focal=1.0, pp=(0., 0.), method=cv2.RANSAC, prob=0.999, threshold=3.0)
+    points, R, t, mask = cv2.recoverPose(E, points1, points2)
+    S = np.eye(4)
+    S[0:3, 0:3] = R
+    S[0:3, 3] = t.transpose()
+    # print(np.linalg.norm(t), t[0][0], t[1][0], t[2][0])
+    # # print(R)
+    # print()
+    
+    pose_list.append(S)
 
     for i in track_idx:
         x = int(forward_move[0][i])
@@ -219,14 +246,57 @@ for k, (b, e) in tqdm(enumerate(zip(idx_array[:-1], idx_array[1:])), total = num
         y_ = int(backward_move[1][i])
         color = np.random.randint(0, 255, size=(1, 3), dtype=np.uint8).squeeze()
         color = ( int (color [ 0 ]), int (color [ 1 ]), int (color [ 2 ]))
-        img_bot = cv2.circle(img_bot, (x, y), radius=3, color=color, thickness=-1)
-        img_bot = cv2.circle(img_bot, (x_, y_), radius=3, color=color, thickness=-1)
+        img_bot = cv2.circle(img_bot, (x, y), radius=3, color=color, thickness=1)
+        img_bot = cv2.circle(img_bot, (x_, y_), radius=3, color=color, thickness=1)
         img_bot = cv2.line(img_bot, (x,y), (x_,y_), color=color, thickness=1)
 
     img = np.vstack([img_top, img_bot])
     cv2.imshow("", img)
     cv2.imwrite(f"{k}.png", img)
 
-    cv2.waitKey(100000)
-    raise
+    cv2.waitKey(1)
+
+
+
+
+coord_list = []
+
+coord = np.array([0, 0, 0, 1])
+old_coord = np.array([0, 0, 0, 1])
+for p in pose_list:
+
+
+    coord = p.dot(old_coord)
+
+    diff = np.linalg.norm(coord - old_coord)
+    if diff > 2:
+        print(old_coord)
+        print(coord)
+        print(p)
+        print()
+        print()
+        continue
+
+    
+    coord_list.append(coord)
+    old_coord = coord
+    
+
+
+
+coord_list = np.array(coord_list)
+x = coord_list[:, 0]
+y = coord_list[:, 1]
+# z = np.zeros_like(x)
+z = coord_list[:, 2]
+idx = np.arange(len(x))
+
+fig = plt.figure()
+ax = plt.axes(projection="3d")
+
+ax.plot3D(x, y, z, 'gray')
+ax.scatter3D(x, y, z, c=idx, cmap='hsv');
+
+plt.show()
+
 
