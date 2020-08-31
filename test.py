@@ -17,23 +17,21 @@ from util import *
 
 
 
-skip_frames = 4
-fps = 10
+skip_frames = 1
 offset_img_idx = 1968
 total_num_frames = 26605
 sensor_size  = np.array([260, 346])
 padding      = np.array([2, 5])
 cropped_size = sensor_size - 2 * padding
 camIntrinsic = np.array([[223.9940010790056, 0, 170.7684322973841], [0, 223.61783486959376, 128.18711828338436], [0, 0, 1]])
-dt = 1. / fps
 
 
 
 events_path =   "/mnt/Data1/dataset/evflow-data/outdoor_day2/h5_events/outdoor_day2_data.h5"
 # image_ts_path = "/mnt/Data1/dataset/evflow-data/outdoor_day2/outdoor_day2_data.hdf5" # outdoor2
-# gt_path =       "/mnt/Data1/dataset/evflow-data/outdoor_day2/outdoor_day2_gt.hdf5"  # outdoor2
-# pre_gen_flow =  "/mnt/Data3/outdoor_day2_tf_output_trim_skip1.h5"
-pre_gen_flow =  "/mnt/Data2/EV_FlowNet_daniilidis/outdoor_day2_tf_output_trim_skip4.h5"
+gt_path =       "/mnt/Data1/dataset/evflow-data/outdoor_day2/outdoor_day2_gt.hdf5"  # outdoor2
+pre_gen_flow =  "/mnt/Data3/outdoor_day2_tf_output_trim_skip1.h5"
+# pre_gen_flow =  "/mnt/Data2/EV_FlowNet_daniilidis/outdoor_day2_tf_output_trim_skip4.h5"
 
 
 
@@ -41,8 +39,8 @@ inv_pose_list = []
 with h5py.File(pre_gen_flow, "r") as h5_file:
     for i in range(1, total_num_frames-skip_frames, skip_frames):
 
-        # if i < 100:   continue
-        if i > 1000:    break
+        if i < 100:   continue
+        if i > 800:    break
 
         # Get events timestamp
         start_t = h5_file["prev_images"]["image{:09d}".format(i)].attrs['timestamp']
@@ -82,6 +80,33 @@ with h5py.File(pre_gen_flow, "r") as h5_file:
         S[0:3, 0:3] = np.transpose(R)
         S[0:3, 3]   = - np.transpose(R) @ np.squeeze(t)
         inv_pose_list.append(S)
+
+
+        gt_start_idx = binary_search_h5_gt_timestamp(gt_path, 0, None, start_t, side='right')
+        gt_end_idx = binary_search_h5_gt_timestamp(gt_path, 0, None, end_t, side='right')
+
+        # Get ground truth
+        with h5py.File(gt_path, "r") as h5_file:
+            gt_pose = h5_file['davis']['left']['pose']
+            gt_ts = h5_file['davis']['left']['pose_ts']
+
+            gt_start_t1 = gt_ts[gt_start_idx]
+            gt_start_t2 = gt_ts[gt_start_idx + 1]
+            gt_end_t1 = gt_ts[gt_end_idx]
+            gt_end_t2 = gt_ts[gt_end_idx + 1]
+
+            gt_start_p1 = gt_pose[gt_start_idx]
+            gt_start_p2 = gt_pose[gt_start_idx + 1]
+            gt_end_p1 = gt_pose[gt_end_idx]
+            gt_end_p2 = gt_pose[gt_end_idx + 1]
+
+            print(gt_start_t1, start_t, gt_start_t2)
+            print(gt_end_t1, end_t, gt_end_t2)
+
+        
+
+        raise
+
 
         # Visualize images, flow and event images
         rgb_img = np.array(h5_file["prev_images"]["image{:09d}".format(i)])
@@ -166,4 +191,3 @@ plt.show()
 #     img_ts = h5_file['davis']['left']['image_raw_ts']
 #     img = h5_file['davis']['left']['image_raw']
 #     img = np.array(img[offset_img_idx])
-
