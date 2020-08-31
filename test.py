@@ -8,295 +8,162 @@ from tqdm import tqdm
 from mpl_toolkits import mplot3d
 import matplotlib.pyplot as plt
 
+import h5py
 import copy
 import cv2
-
 import sys
-cur_path = Path(__file__).parent.resolve()
-module_name = cur_path.name
-sys.path.append(str(cur_path.parent))
-OpticalFlow = __import__(module_name).OpticalFlow
 
-data_base = cur_path/'data'/'events'
-out_path = cur_path/'res'
-out_path.mkdir(parents=True, exist_ok=True)
+from util import *
 
-# events. Note that polarity values are in {-1, +1}
-events = np.load(str(data_base/'outdoor.npy'))
-# number of frames per second
-fps = 30
-# height and width of images
-imsize = 280, 360
-# window size in microseconds
+
+
+skip_frames = 4
+fps = 10
+offset_img_idx = 1968
+total_num_frames = 26605
+sensor_size  = np.array([260, 346])
+padding      = np.array([2, 5])
+cropped_size = sensor_size - 2 * padding
+camIntrinsic = np.array([[223.9940010790056, 0, 170.7684322973841], [0, 223.61783486959376, 128.18711828338436], [0, 0, 1]])
 dt = 1. / fps
 
-def vis_flow(flow):
-    mag = np.linalg.norm(flow, axis=2)
-    a_mag = np.min(mag)
-    b_mag = np.max(mag)
-
-    ang = np.arctan2(flow[...,0], flow[...,1])
-    ang += np.pi
-    ang *= 180. / np.pi / 2.
-    ang = ang.astype(np.uint8)
-    hsv = np.zeros(list(flow.shape[:2]) + [3], dtype=np.uint8)
-    hsv[:, :, 0] = ang
-    hsv[:, :, 1] = 255
-    hsv[:, :, 2] = np.clip(mag, 0, 255)
-    hsv[:, :, 2] = ((mag - a_mag).astype(np.float32) * (255. / (b_mag - a_mag + 1e-32))).astype(np.uint8)
-    flow_rgb = hsv2rgb(hsv)
-    return 255 - (flow_rgb * 255).astype(np.uint8)
-
-def draw_color_wheel_np(width, height):
-    color_wheel_x = np.linspace(-width / 2.,
-                                 width / 2.,
-                                 width)
-    color_wheel_y = np.linspace(-height / 2.,
-                                 height / 2.,
-                                 height)
-    color_wheel_X, color_wheel_Y = np.meshgrid(color_wheel_x, color_wheel_y)
-    flow = np.dstack([color_wheel_X, color_wheel_Y])
-    color_wheel_rgb = vis_flow(flow)
-    return color_wheel_rgb
-
-def vis_events(events, imsize):
-    res = np.zeros(imsize, dtype=np.uint8).ravel()
-    x, y = map(lambda x: x.astype(int), events[:2])
-    i = np.ravel_multi_index([y, x], imsize)
-    np.maximum.at(res, i, np.full_like(x, 255, dtype=np.uint8))
-    return np.tile(res.reshape(imsize)[..., None], (1, 1, 3))
-
-def collage(flow_rgb, events_rgb):
-    flow_rgb = flow_rgb[::-1]
-
-    orig_h, orig_w, c = flow_rgb[0].shape
-    h = orig_h + flow_rgb[1].shape[0]
-    w = orig_w + events_rgb.shape[1]
-
-    res = np.zeros((h, w, c), dtype=events_rgb.dtype)
-    res[:orig_h, :orig_w] = flow_rgb[0]
-    res[:orig_h, orig_w:] = events_rgb
-
-    k = 0
-    for img in flow_rgb[1:]:
-        h, w = img.shape[:2]
-        l = k + w
-        res[orig_h:orig_h+h, k:l] = img
-        k = l
-    return res
-
-def move_flow(flow, events, imsize, forward=True):
-
-    x, y, t, p = events
-
-    if forward:
-        t = (t[-1] - t) / (t[-1] - t[0])
-    else:
-        t = (t[0] - t) / (t[-1] - t[0])
-
-    x = x.astype(int)
-    y = y.astype(int)
-
-    y_ = y + t * flow[y, x, 0]
-    x_ = x + t * flow[y, x, 1]
-
-    x_ = np.clip(x_, 0, imsize[1]-1).astype(int)
-    y_ = np.clip(y_, 0, imsize[0]-1).astype(int)
-
-    return (x_, y_, t, p)
-
-def get_pos_events(events):
-    x, y, t, p = events
-
-    x = x[p == 1.0]
-    y = y[p == 1.0]
-    t = t[p == 1.0]
-    p = p[p == 1.0]
-
-    x = x[y < 200]
-    t = t[y < 200]
-    p = p[y < 200]
-    y = y[y < 200]
-
-    return [x, y, t, p]
-
-def get_neg_events(events):
-    x, y, t, p = events
-
-    x = x[p == 0.0]
-    y = y[p == 0.0]
-    t = t[p == 0.0]
-    p = p[p == 0.0]
-
-    return [x, y, t, p]
-
-def get_events_by_idx(events, idx):
-    x, y, t, p = events
-
-    x = x[idx]
-    y = y[idx]
-    t = t[idx]
-    p = p[idx]
-
-    return [x, y, t, p]
 
 
-def get_new_track_points_idx(track_pts, events, num_events_sample=2000):
-
-    xs, ys, ts, ps = track_pts
-    x_, y_, t_, p_ = events
-
-    # filter out eariler events
-    x_ = x_[-num_events_sample:]
-    y_ = y_[-num_events_sample:]
-    t_ = t_[-num_events_sample:]
-    p_ = p_[-num_events_sample:]
-
-    # create list of absolute index of positive and negative events
-    idx_list = np.arange(len(x_)) + len(events[0]) - num_events_sample
-
-    new_events = []
-    for x, y, t, p in zip(xs, ys, ts, ps):
-
-        mask = p_ == p
-        new_x = x_[mask]
-        new_y = y_[mask]
-
-        dist = (x - new_x)**2  + (y - new_y)**2
-        idx = np.argmin(dist)
-        abs_idx = idx_list[idx]
-
-        new_events.append(abs_idx)
-
-    return np.array(new_events, dtype=np.int)
-
-
-of = OpticalFlow(imsize)
-
-x, y, t, p = events
-
-start_t = t[0]
-stop_t = t[-1]
-frame_ts = np.arange(start_t, stop_t, dt)
-frame_ts = np.append(frame_ts, [frame_ts[-1] + dt])
-num_frames = len(frame_ts) - 1
-idx_array = np.searchsorted(t, frame_ts)
-
-
-pose_list = []
-
-for k, (b, e) in tqdm(enumerate(zip(idx_array[:-1], idx_array[1:])), total = num_frames):
-
-    if k < 3500:
-        continue
-
-    # if k > 3600:
-    #     break
-
-    frame_events = get_pos_events([x[b:e] for x in events])
-    flow = of([frame_events], [frame_ts[k]], [frame_ts[k+1]], return_all=True)
-    flow = tuple(map(np.squeeze, flow))
-
-    event_img = vis_events(frame_events, imsize)
-    forward_move = move_flow(flow[3], frame_events, imsize, forward=True)
-    backward_move = move_flow(flow[3], frame_events, imsize, forward=False)
-
-    # visualization
-    flow_img = vis_flow(flow[3])
-    flow_img[-50:, -50:] = draw_color_wheel_np(50, 50)
-    forward_img = vis_events(forward_move, imsize)
-    backward_img = vis_events(backward_move, imsize)
-    diff_img = np.abs(forward_img - backward_img)
-
-    # Add labels to images
-    cv2.putText(flow_img, "Flow Prediction", (0, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-    cv2.putText(event_img, "Event Image", (0, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-    cv2.putText(forward_img, "Forward", (0, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-    cv2.putText(backward_img, "Backward", (0, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-    cv2.putText(diff_img, "diff", (0, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-
-    img_top = np.hstack([flow_img, event_img, np.zeros_like(event_img)])
-    img_bot = np.hstack([forward_img, backward_img, diff_img])
-
-    track_idx = np.random.randint(0, len(frame_events[0]), size=10)
-
-    x = forward_move[0][track_idx]
-    y = forward_move[1][track_idx]
-    x_ = backward_move[0][track_idx]
-    y_ = backward_move[1][track_idx]
-
-    points1 = np.dstack([x_, y_]).squeeze()
-    points2 = np.dstack([x, y]).squeeze()
-
-    E, mask = cv2.findEssentialMat(points1, points2, focal=1.0, pp=(0., 0.), method=cv2.RANSAC, prob=0.999, threshold=3.0)
-    points, R, t, mask = cv2.recoverPose(E, points1, points2)
-    S = np.eye(4)
-    S[0:3, 0:3] = R
-    S[0:3, 3] = t.transpose()
-    # print(np.linalg.norm(t), t[0][0], t[1][0], t[2][0])
-    # # print(R)
-    # print()
-    
-    pose_list.append(S)
-
-    for i in track_idx:
-        x = int(forward_move[0][i])
-        y = int(forward_move[1][i])
-        x_ = int(backward_move[0][i]) + 360
-        y_ = int(backward_move[1][i])
-        color = np.random.randint(0, 255, size=(1, 3), dtype=np.uint8).squeeze()
-        color = ( int (color [ 0 ]), int (color [ 1 ]), int (color [ 2 ]))
-        img_bot = cv2.circle(img_bot, (x, y), radius=3, color=color, thickness=1)
-        img_bot = cv2.circle(img_bot, (x_, y_), radius=3, color=color, thickness=1)
-        img_bot = cv2.line(img_bot, (x,y), (x_,y_), color=color, thickness=1)
-
-    img = np.vstack([img_top, img_bot])
-    cv2.imshow("", img)
-    cv2.imwrite(f"{k}.png", img)
-
-    cv2.waitKey(1)
+events_path =   "/mnt/Data1/dataset/evflow-data/outdoor_day2/h5_events/outdoor_day2_data.h5"
+# image_ts_path = "/mnt/Data1/dataset/evflow-data/outdoor_day2/outdoor_day2_data.hdf5" # outdoor2
+# gt_path =       "/mnt/Data1/dataset/evflow-data/outdoor_day2/outdoor_day2_gt.hdf5"  # outdoor2
+# pre_gen_flow =  "/mnt/Data3/outdoor_day2_tf_output_trim_skip1.h5"
+pre_gen_flow =  "/mnt/Data2/EV_FlowNet_daniilidis/outdoor_day2_tf_output_trim_skip4.h5"
 
 
 
+inv_pose_list = []
+with h5py.File(pre_gen_flow, "r") as h5_file:
+    for i in range(1, total_num_frames-skip_frames, skip_frames):
 
+        # if i < 100:   continue
+        if i > 1000:    break
+
+        # Get events timestamp
+        start_t = h5_file["prev_images"]["image{:09d}".format(i)].attrs['timestamp']
+        end_t = h5_file["next_images"]["image{:09d}".format(i)].attrs['timestamp']
+        start_ev_idx = binary_search_h5_timestamp(events_path, 0, None, start_t)
+        end_ev_idx = binary_search_h5_timestamp(events_path, 0, None, end_t)
+
+        # Get flow estimates
+        flow = np.array(h5_file["flows"]["flow{:09d}".format(i)])
+        flow_img = vis_flow(flow)
+        flow_img[-50:, -50:] = draw_color_wheel_np(50, 50)
+        flow_mask = (np.abs(flow[:, :, 0]) > 0.01) & (np.abs(flow[:, :, 1]) > 0.01)
+
+        # Get events
+        events = get_events_by_idx(events_path, start_ev_idx, end_ev_idx)
+        pos = get_pos_events(events)
+        neg = get_neg_events(events)
+        pos = crop_car_events(crop_center_events(pos, sensor_size, trim_size=padding))
+        neg = crop_car_events(crop_center_events(neg, sensor_size, trim_size=padding))
+
+        # Move events forward and backward
+        pos_backward = move_flow_with_time(flow, pos, cropped_size, forward=False)
+        pos_forward = move_flow_with_time(flow, pos, cropped_size, forward=True)
+        neg_backward = move_flow_with_time(flow, neg, cropped_size, forward=False)
+        neg_forward = move_flow_with_time(flow, neg, cropped_size, forward=True)
+
+        # Get correpsondence points and R, t
+        p1, p2 = get_random_selected_correspondence_points(pos_backward, pos_forward, num_track_points=200, mask=flow_mask)
+        # n1, n2 = get_random_selected_correspondence_points(neg_backward, neg_forward, num_track_points=200, mask=flow_mask)
+        # pt1 = np.vstack([p1, n1])
+        # pt2 = np.vstack([p2, n2])
+
+        E, mask = cv2.findEssentialMat(p1, p2, cameraMatrix=camIntrinsic, method=cv2.RANSAC, prob=0.999, threshold=5.0)
+        points, R, t, mask = cv2.recoverPose(E, p1, p2, mask=mask)
+
+        S = np.eye(4)
+        S[0:3, 0:3] = np.transpose(R)
+        S[0:3, 3]   = - np.transpose(R) @ np.squeeze(t)
+        inv_pose_list.append(S)
+
+        # Visualize images, flow and event images
+        rgb_img = np.array(h5_file["prev_images"]["image{:09d}".format(i)])
+        rgb_img = np.tile(rgb_img[..., np.newaxis], [1, 1, 3])
+
+        pos_original = vis_events(pos, cropped_size)
+        pos_backward_img = vis_events(pos_backward, cropped_size)
+        pos_forward_img = vis_events(pos_forward, cropped_size)
+
+        # neg_original = vis_events(neg, cropped_size)
+        # neg_backward_img = vis_events(neg_backward, cropped_size)
+        # neg_forward_img = vis_events(neg_forward, cropped_size)
+        top = np.hstack([pos_original, rgb_img, flow_img])
+        bot = np.hstack([pos_backward_img, pos_forward_img, pos_backward_img - pos_forward_img])
+
+        # Draw correspondence points
+        for pt1, pt2 in zip(p1, p2):
+            x1, y1 = pt1
+            x2, y2 = pt2
+
+            x1 = int(x1)
+            y1 = int(y1)
+            x2 = int(x2 + cropped_size[1])
+            y2 = int(y2)
+            
+            color = np.random.randint(0, 255, size=(1, 3), dtype=np.uint8).squeeze()
+            color = (int(color [0]), int(color[1]), int(color[2]))
+            bot = cv2.circle(bot, (x1, y1), radius=3, color=color, thickness=1)
+            bot = cv2.circle(bot, (x2, y2), radius=3, color=color, thickness=1)
+            bot = cv2.line(bot, (x1,y1), (x2,y2), color=color, thickness=1)
+
+        img = np.vstack([top, bot])
+        cv2.imshow("img", img)
+        cv2.waitKey(1)
+
+
+
+# Convert to world coordinate
 coord_list = []
-
-coord = np.array([0, 0, 0, 1])
-old_coord = np.array([0, 0, 0, 1])
-for p in pose_list:
-
-
-    coord = p.dot(old_coord)
-
-    diff = np.linalg.norm(coord - old_coord)
-    if diff > 2:
-        print(old_coord)
-        print(coord)
-        print(p)
-        print()
-        print()
-        continue
-
+total_trans = np.eye(4)
+last_location = np.eye(4)
+for i, p in enumerate(inv_pose_list):
     
-    coord_list.append(coord)
-    old_coord = coord
-    
+    total_trans = total_trans @ p
+    location = total_trans[:, 3]
+    coord_list.append(location)
 
-
+    # diff = np.linalg.norm(location - last_location)
+    # print(diff)
+    # last_location = total_trans[:, 3]
 
 coord_list = np.array(coord_list)
+
+
+
+
+# Visualize path 
 x = coord_list[:, 0]
 y = coord_list[:, 1]
-# z = np.zeros_like(x)
-z = coord_list[:, 2]
+z = np.zeros_like(x)
+# z = coord_list[:, 2]
 idx = np.arange(len(x))
 
 fig = plt.figure()
 ax = plt.axes(projection="3d")
 
 ax.plot3D(x, y, z, 'gray')
-ax.scatter3D(x, y, z, c=idx, cmap='hsv');
-
+ax.scatter3D(x, y, z, c=idx, cmap='hsv')
 plt.show()
 
+
+
+
+
+
+# with h5py.File(gt_path, "r") as h5_file:
+#     gt_pose = h5_file['davis']['left']['pose']
+#     gt_ts = h5_file['davis']['left']['pose_ts']
+
+
+# with h5py.File(image_ts_path, "r") as h5_file:
+#     img_ts = h5_file['davis']['left']['image_raw_ts']
+#     img = h5_file['davis']['left']['image_raw']
+#     img = np.array(img[offset_img_idx])
 
