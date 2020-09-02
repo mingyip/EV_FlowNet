@@ -35,12 +35,16 @@ pre_gen_flow =  "/mnt/Data3/outdoor_day2_tf_output_trim_skip1.h5"
 
 
 
-inv_pose_list = []
+
+# gt_trans = np.empty([1, 3])
+gt_camera_frame = []
+predict_camera_frame = []
+
 with h5py.File(pre_gen_flow, "r") as h5_file:
     for i in range(1, total_num_frames-skip_frames, skip_frames):
 
-        if i < 100:   continue
-        if i > 800:    break
+        if i < 400:   continue
+        if i > 440:    break
 
         # Get events timestamp
         start_t = h5_file["prev_images"]["image{:09d}".format(i)].attrs['timestamp']
@@ -68,45 +72,64 @@ with h5py.File(pre_gen_flow, "r") as h5_file:
         neg_forward = move_flow_with_time(flow, neg, cropped_size, forward=True)
 
         # Get correpsondence points and R, t
-        p1, p2 = get_random_selected_correspondence_points(pos_backward, pos_forward, num_track_points=200, mask=flow_mask)
+        p1, p2 = get_random_selected_correspondence_points(pos_backward, pos_forward, num_track_points=100, mask=flow_mask)
         # n1, n2 = get_random_selected_correspondence_points(neg_backward, neg_forward, num_track_points=200, mask=flow_mask)
         # pt1 = np.vstack([p1, n1])
         # pt2 = np.vstack([p2, n2])
 
-        E, mask = cv2.findEssentialMat(p1, p2, cameraMatrix=camIntrinsic, method=cv2.RANSAC, prob=0.999, threshold=5.0)
+        E, mask = cv2.findEssentialMat(p1, p2, cameraMatrix=camIntrinsic, method=cv2.RANSAC, prob=0.999, threshold=1.5)
         points, R, t, mask = cv2.recoverPose(E, p1, p2, mask=mask)
 
-        S = np.eye(4)
-        S[0:3, 0:3] = np.transpose(R)
-        S[0:3, 3]   = - np.transpose(R) @ np.squeeze(t)
-        inv_pose_list.append(S)
-
-
-        gt_start_idx = binary_search_h5_gt_timestamp(gt_path, 0, None, start_t, side='right')
-        gt_end_idx = binary_search_h5_gt_timestamp(gt_path, 0, None, end_t, side='right')
+        gt_pt1_idx = binary_search_h5_gt_timestamp(gt_path, 0, None, start_t, side='right')
+        gt_pt2_idx = binary_search_h5_gt_timestamp(gt_path, 0, None, end_t, side='right')
 
         # Get ground truth
-        with h5py.File(gt_path, "r") as h5_file:
-            gt_pose = h5_file['davis']['left']['pose']
-            gt_ts = h5_file['davis']['left']['pose_ts']
+        with h5py.File(gt_path, "r") as gt_file:
+            gt_pose = gt_file['davis']['left']['pose']
+            gt_ts = gt_file['davis']['left']['pose_ts']
 
-            gt_start_t1 = gt_ts[gt_start_idx]
-            gt_start_t2 = gt_ts[gt_start_idx + 1]
-            gt_end_t1 = gt_ts[gt_end_idx]
-            gt_end_t2 = gt_ts[gt_end_idx + 1]
+            gt_pt1_interp_begin_t   = gt_ts[gt_pt1_idx]
+            gt_pt1_interp_end_t     = gt_ts[gt_pt1_idx + 1]
+            gt_pt2_interp_begin_t   = gt_ts[gt_pt2_idx]
+            gt_pt2_interp_end_t     = gt_ts[gt_pt2_idx + 1]
 
-            gt_start_p1 = gt_pose[gt_start_idx]
-            gt_start_p2 = gt_pose[gt_start_idx + 1]
-            gt_end_p1 = gt_pose[gt_end_idx]
-            gt_end_p2 = gt_pose[gt_end_idx + 1]
+            gt_pose1_interp_begin   = gt_pose[gt_pt1_idx]
+            gt_pose1_interp_end     = gt_pose[gt_pt1_idx + 1]
+            gt_pose2_interp_begin   = gt_pose[gt_pt2_idx]
+            gt_pose2_interp_end     = gt_pose[gt_pt2_idx + 1]
 
-            print(gt_start_t1, start_t, gt_start_t2)
-            print(gt_end_t1, end_t, gt_end_t2)
+        ratio1 = (gt_pt1_interp_end_t - start_t) / (gt_pt1_interp_end_t - gt_pt1_interp_begin_t)
+        ratio2 = (gt_pt2_interp_end_t - end_t) / (gt_pt2_interp_end_t - gt_pt2_interp_begin_t)
+        twc1 = ratio1 * gt_pose1_interp_begin[0:3, 3] + (1 - ratio1) * gt_pose1_interp_end[0:3, 3]
+        twc2 = ratio2 * gt_pose2_interp_begin[0:3, 3] + (1 - ratio2) * gt_pose2_interp_end[0:3, 3]
 
-        
+        twc1 = interp_rigid_matrix(gt_pose1_interp_begin, 
+                                        gt_pose1_interp_end, 
+                                        gt_pt1_interp_begin_t, 
+                                        gt_pt1_interp_end_t, 
+                                        start_t)
 
-        raise
+        twc2 = interp_rigid_matrix(gt_pose2_interp_begin, 
+                                        gt_pose2_interp_end, 
+                                        gt_pt2_interp_begin_t, 
+                                        gt_pt2_interp_end_t, 
+                                        end_t)
 
+        t_c1_c2 = np.linalg.inv(twc1) @ twc2
+        gt_camera_frame.append(t_c1_c2)
+
+        # scale t
+        t *= np.linalg.norm(twc2 - twc1)
+
+        if i < 405:
+            print(np.linalg.norm(twc2 - twc1))
+
+        S = np.eye(4)
+        S[0:3, 0:3] = R
+        S[0:3, 3]   = np.squeeze(t)
+        predict_camera_frame.append(S)
+
+        # raise
 
         # Visualize images, flow and event images
         rgb_img = np.array(h5_file["prev_images"]["image{:09d}".format(i)])
@@ -144,6 +167,45 @@ with h5py.File(pre_gen_flow, "r") as h5_file:
 
 
 
+gt_camera_frame = np.array(gt_camera_frame)
+predict_camera_frame = np.array(predict_camera_frame)
+
+for i in range(len(gt_camera_frame)-1):
+
+    q_i     = gt_camera_frame[i]
+    q_i_1   = gt_camera_frame[i+1]
+    q_i_inv = np.linalg.inv(q_i)
+
+    p_i     = predict_camera_frame[i]
+    p_i_1   = predict_camera_frame[i+1]
+    p_i_inv = np.linalg.inv(p_i)
+
+    ei = np.linalg.inv(q_i_inv @ q_i_1) @ (p_i_inv @ p_i_1)
+
+    trans = ei[0:3, 3]
+    print(ei)
+    print()
+    norm_trans = np.linalg.norm(trans)
+
+    # print(i, norm_trans)
+    if i > 4:
+        raise
+
+
+
+raise
+
+
+
+
+
+
+
+
+
+
+
+
 # Convert to world coordinate
 coord_list = []
 total_trans = np.eye(4)
@@ -161,13 +223,16 @@ for i, p in enumerate(inv_pose_list):
 coord_list = np.array(coord_list)
 
 
-
-
 # Visualize path 
 x = coord_list[:, 0]
 y = coord_list[:, 1]
-z = np.zeros_like(x)
-# z = coord_list[:, 2]
+# z = np.zeros_like(x)
+z = coord_list[:, 2]
+
+
+# x = ground_truth_trans[1:, 0]
+# y = ground_truth_trans[1:, 1]
+# z = ground_truth_trans[1:, 2]
 idx = np.arange(len(x))
 
 fig = plt.figure()
@@ -177,17 +242,7 @@ ax.plot3D(x, y, z, 'gray')
 ax.scatter3D(x, y, z, c=idx, cmap='hsv')
 plt.show()
 
-
-
-
-
-
-# with h5py.File(gt_path, "r") as h5_file:
-#     gt_pose = h5_file['davis']['left']['pose']
-#     gt_ts = h5_file['davis']['left']['pose_ts']
-
-
-# with h5py.File(image_ts_path, "r") as h5_file:
-#     img_ts = h5_file['davis']['left']['image_raw_ts']
-#     img = h5_file['davis']['left']['image_raw']
-#     img = np.array(img[offset_img_idx])
+# fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(5, 3))
+# axes[0].plot(x1, y1)
+# axes[1].plot(x2, y2)
+# fig.tight_layout()

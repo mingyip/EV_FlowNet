@@ -5,7 +5,8 @@ import numpy as np
 import h5py
 import cv2
 
-
+from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Slerp
 
 
 def binary_search_h5_dset(dset, x, l=None, r=None, side='left'):
@@ -115,7 +116,7 @@ def get_random_selected_correspondence_points(e1, e2, num_track_points=100, mask
         track_idx = np.array([], dtype=int)
 
         while len(track_idx) < num_track_points:
-            idx = np.random.randint(0, num_events)
+            idx = np.random.randint(0, num_events * 0.3)
             x1, y1 = int(e1[0][idx]), int(e1[1][idx])
             x2, y2 = int(e2[0][idx]), int(e2[1][idx])
 
@@ -269,3 +270,82 @@ def get_new_track_points_idx(track_pts, events, num_events_sample=2000):
         new_events.append(abs_idx)
 
     return np.array(new_events, dtype=np.int)
+
+
+def interp_rotation_matrix(start_R, end_R, start_time, end_time, slerp_time):
+
+    rotations = R.from_matrix([start_R, end_R])
+    key_times = [start_time, end_time]
+
+    slerp = Slerp(key_times, rotations)
+    interp_rots = slerp([slerp_time])
+
+    return interp_rots.as_matrix().squeeze()
+
+def interp_rigid_matrix(start_R, end_R, start_time, end_time, slerp_time):
+
+    ratio = (slerp_time - start_time) / (end_time - start_time)
+    slerp_translation = ratio * start_R[0:3, 3] + (1 - ratio) * end_R[0:3, 3]
+    slerp_rotation = interp_rotation_matrix(start_R[0:3, 0:3], end_R[0:3, 0:3], start_time, end_time, slerp_time)
+
+    interp_rigid = np.eye(4, 4)
+    interp_rigid[0:3, 0:3] = slerp_rotation
+    interp_rigid[0:3, 3] = slerp_translation
+
+    return interp_rigid
+
+
+def inverse_rigid_matrix(matrix):
+
+    inv_matrix = np.zeros((len(matrix), 4, 4))
+    R = matrix[:, 0:3, 0:3]
+    t = matrix[:, 0:3, 3]
+    R_inv = R.transpose(0, 2, 1)
+
+
+    for i, (ro, tn) in enumerate(zip(R_inv, t)):
+
+        inv_matrix[i, 0:3, 0:3] = ro
+        inv_matrix[i, 0:3, 3] = -ro @ tn
+        inv_matrix[i, 3, 3] = 1
+
+    return inv_matrix
+
+def world_to_camera_frames(T_wc):
+
+    T_c = []
+
+    last_frame = np.eye(4)
+    for T_ in T_wc:
+        T_c.append(np.linalg.inv(T_) @ last_frame)
+
+        last_frame = T_
+
+    return np.array(T_c)
+
+def camera_to_world_frames(T_c):
+
+    T_wc = []
+
+    total_trans = np.eye(4)
+    for T in T_c:
+        
+        total_trans = total_trans @ np.linalg.inv(T)
+        T_wc.append(total_trans)
+
+    return np.array(T_wc)
+    
+
+# m = np.zeros((2, 4, 4))
+# m[:, 0:3, 0:3] = R.random(2).as_matrix()
+# m[:, 0:3, 3] = np.random.randint(5, size=(2, 3))
+# m[:, 3, 3] = 1
+
+
+# print(m)
+# print()
+
+# m = world_to_camera_frames(m)
+# m = camera_to_world_frames(m)
+
+# print(m)
